@@ -11,12 +11,15 @@ private var focusedApp: (any AbstractApp)? {
             return appForTests
         } else {
             check(appForTests == nil)
-            return try await NSWorkspace.shared.frontmostApplication.flatMapAsyncMainActor(MacApp.getOrRegister)
+            return switch NSWorkspace.shared.frontmostApplication {
+                case let frontmostApplication?: try await MacApp.getOrRegister(frontmostApplication)
+                case nil: nil
+            }
         }
     }
 }
 
 @MainActor
-func getNativeFocusedWindow() async throws -> Window? {
-    try await focusedApp?.getFocusedWindow()
+func getNativeFocusedWindow(_ cm: CancellationMode) async throws -> Window? {
+    try await focusedApp?.getFocusedWindow(cm)
 }

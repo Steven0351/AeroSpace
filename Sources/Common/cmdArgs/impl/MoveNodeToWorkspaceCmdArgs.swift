@@ -1,39 +1,45 @@
 public struct MoveNodeToWorkspaceCmdArgs: CmdArgs {
-    public let rawArgs: EquatableNoop<[String]>
-    public static let parser: CmdParser<Self> = cmdParser(
+    /*conforms*/ public var commonState: CmdArgsCommonState
+    public static let parser: CmdParser<Self> = .init(
         kind: .moveNodeToWorkspace,
-        allowInConfig: true,
         help: move_node_to_workspace_help_generated,
-        options: [
-            "--wrap-around": optionalTrueBoolFlag(\._wrapAround),
+        flags: [
+            "--wrap-around": ArgParser(\._wrapAround, constSubArgParserFun(true)),
             "--fail-if-noop": trueBoolFlag(\.failIfNoop),
-            "--window-id": optionalWindowIdFlag(),
-            "--focus-follows-window": trueBoolFlag(\.focusFollowsWindow),
+            "--window-id": windowIdSubArgParser(),
+            "--focus-follows-window": ArgParser(\.focusFollowsWindow, constSubArgParserFun(true)),
+
+            "--stdin": ArgParser(\.commonState.explicitStdinFlag, constSubArgParserFun(true)),
+            "--no-stdin": ArgParser(\.commonState.explicitStdinFlag, constSubArgParserFun(false)),
         ],
-        arguments: [newArgParser(\.target, parseWorkspaceTarget, mandatoryArgPlaceholder: workspaceTargetPlaceholder)],
+        posArgs: [
+            dashDashArg(mandatory: false),
+            newMandatoryPosArgParser(\.target, parseWorkspaceTarget, placeholder: workspaceTargetPlaceholder),
+        ],
+        conflictingOptions: [
+            ["--stdin", "--no-stdin"],
+        ],
     )
 
     public var _wrapAround: Bool?
     public var failIfNoop: Bool = false
     public var focusFollowsWindow: Bool = false
-    /*conforms*/ public var windowId: UInt32?
-    /*conforms*/ public var workspaceName: WorkspaceName?
     public var target: Lateinit<WorkspaceTarget> = .uninitialized
 
-    public init(rawArgs: [String]) {
-        self.rawArgs = .init(rawArgs)
+    public init(rawArgs: StrArrSlice) {
+        self.commonState = .init(rawArgs)
     }
 }
 
 extension MoveNodeToWorkspaceCmdArgs {
     public var wrapAround: Bool { _wrapAround ?? false }
+    public var useStdin: Bool { commonState.explicitStdinFlag ?? false }
 }
 
-func implication(ifTrue: Bool, mustHold: @autoclosure () -> Bool) -> Bool { !ifTrue || mustHold() }
-
-public func parseMoveNodeToWorkspaceCmdArgs(_ args: [String]) -> ParsedCmd<MoveNodeToWorkspaceCmdArgs> {
-    parseSpecificCmdArgs(MoveNodeToWorkspaceCmdArgs(rawArgs: .init(args)), args)
+func parseMoveNodeToWorkspaceCmdArgs(_ args: StrArrSlice) -> ParsedCmd<MoveNodeToWorkspaceCmdArgs> {
+    parseSpecificCmdArgs(MoveNodeToWorkspaceCmdArgs(rawArgs: args), args)
         .filter("--wrapAround requires using (prev|next) argument") { ($0._wrapAround != nil).implies($0.target.val.isRelatve) }
         .filterNot("--fail-if-noop is incompatible with (next|prev)") { $0.failIfNoop && $0.target.val.isRelatve }
         .filterNot("--window-id is incompatible with (next|prev)") { $0.windowId != nil && $0.target.val.isRelatve }
+        .filter("--stdin and --no-stdin require using \(NextPrev.unionLiteral) argument") { ($0.commonState.explicitStdinFlag != nil).implies($0.target.val.isRelatve) }
 }

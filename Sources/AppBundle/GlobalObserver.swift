@@ -1,7 +1,7 @@
 import AppKit
 import Common
 
-class GlobalObserver {
+enum GlobalObserver {
     private static func onNotif(_ notification: Notification) {
         // Third line of defence against lock screen window. See: closedWindowsCache
         // Second and third lines of defence are technically needed only to avoid potential flickering
@@ -9,21 +9,21 @@ class GlobalObserver {
             return
         }
         let notifName = notification.name.rawValue
-        Task { @MainActor in
+        Task.startUnstructured { @MainActor in
             if !TrayMenuModel.shared.isEnabled { return }
             if notifName == NSWorkspace.didActivateApplicationNotification.rawValue {
-                runRefreshSession(.globalObserver(notifName), optimisticallyPreLayoutWorkspaces: true)
+                scheduleCancellableCompleteRefreshSession(.globalObserver(notifName), optimisticallyPreLayoutWorkspaces: true)
             } else {
-                runRefreshSession(.globalObserver(notifName))
+                scheduleCancellableCompleteRefreshSession(.globalObserver(notifName))
             }
         }
     }
 
     private static func onHideApp(_ notification: Notification) {
         let notifName = notification.name.rawValue
-        Task { @MainActor in
+        Task.startUnstructured { @MainActor in
             guard let token: RunSessionGuard = .isServerEnabled else { return }
-            try await runSession(.globalObserver(notifName), token) {
+            try await runLightSession(.globalObserver(notifName), token) {
                 if config.automaticallyUnhideMacosHiddenApps {
                     if let w = prevFocus?.windowOrNil,
                        w.macAppUnsafe.nsApp.isHidden,
@@ -57,21 +57,21 @@ class GlobalObserver {
             // todo reduce number of refreshSession in the callback
             //  resetManipulatedWithMouseIfPossible might call its own refreshSession
             //  The end of the callback calls refreshSession
-            Task { @MainActor in
+            Task.startUnstructured { @MainActor in
                 guard let token: RunSessionGuard = .isServerEnabled else { return }
                 try await resetManipulatedWithMouseIfPossible()
                 let mouseLocation = mouseLocation
                 let clickedMonitor = mouseLocation.monitorApproximation
                 switch true {
                     // Detect clicks on desktop of different monitors
-                    case clickedMonitor.activeWorkspace != focus.workspace:
-                        _ = try await runSession(.globalObserverLeftMouseUp, token) {
+                    case clickedMonitor.visibleRect.contains(mouseLocation) && clickedMonitor.activeWorkspace != focus.workspace:
+                        _ = try await runLightSession(.globalObserverLeftMouseUp, token) {
                             clickedMonitor.activeWorkspace.focusWorkspace()
                         }
                     // Detect close button clicks for unfocused windows. Yes, kAXUIElementDestroyedNotification is that unreliable
                     //  And trigger new window detection that could be delayed due to mouseDown event
                     default:
-                        runRefreshSession(.globalObserverLeftMouseUp)
+                        scheduleCancellableCompleteRefreshSession(.globalObserverLeftMouseUp)
                 }
             }
         }

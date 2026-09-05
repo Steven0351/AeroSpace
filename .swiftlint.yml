@@ -1,7 +1,6 @@
 excluded:
   - .build
-  - .xcode-build
-  - ./ShellParserGenerated
+  - xcode
 
 # https://realm.github.io/SwiftLint/rule-directory.html
 only_rules:
@@ -23,11 +22,10 @@ only_rules:
   - legacy_nsgeometry_functions # Struct extension properties and methods are preferred over legacy functions
   - legacy_random # Prefer using type.random(in:) over legacy functions
   - local_doc_comment # Prefer regular comments over doc comments in local scopes
-  - modifier_order
   - no_fallthrough_only
   - no_space_in_method_call
   - nsobject_prefer_isequal # NSObject subclasses should implement isEqual instead of ==
-  - operator_whitespace
+  - function_name_whitespace
   - optional_enum_case_matching
   - redundant_discardable_let
   - redundant_nil_coalescing # nil coalescing operator is only evaluated if the lhs is nil, coalescing operator with nil as rhs is redundant
@@ -42,7 +40,6 @@ only_rules:
   # - unused_closure_parameter
   - unused_control_flow_label
   - unused_enumerated # When the index or the item is not used, .enumerated() can be removed.
-  - unused_optional_binding # Prefer != nil over let _ =
   - unused_setter_value
   - weak_delegate # Delegates should be weak to avoid reference cycles
 

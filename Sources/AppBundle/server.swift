@@ -1,115 +1,118 @@
 import AppKit
 import Common
-@preconcurrency import Socket
+import Network
 
 func startUnixSocketServer() {
-    DispatchQueue.global().async {
-        let socket = Result { try Socket.create(family: .unix, type: .stream, proto: .unix) }
-            .getOrDie("Can't create socket ")
-        let socketFile = "/tmp/\(aeroSpaceAppId)-\(unixUserName).sock"
-        Result { try socket.listen(on: socketFile) }.getOrDie("Can't listen to socket \(socketFile) ")
-        while true {
-            guard let connection = try? socket.acceptClientConnection() else { continue }
-            handleConnectionAsync(connection)
+    try? FileManager.default.removeItem(atPath: socketPath)
+    let params = NWParameters.tcp
+    params.requiredLocalEndpoint = .unix(path: socketPath)
+    let listener = Result { try NWListener(using: params) }.getOrDie()
+    listener.newConnectionHandler = { connection in
+        Task.startUnstructured {
+            defer { connection.cancel() }
+            connection.start(queue: .global())
+            await newConnection(connection)
         }
     }
+    listener.start(queue: .global())
 }
 
-// Circumvent error https://github.com/swiftlang/swift/issues/80234:
-//     Value of non-Sendable type '@isolated(any) @async @callee_guaranteed @substituted <τ_0_0> () -> @out τ_0_0 for <()>' accessed after being transferred; later accesses could race
-private func handleConnectionAsync(_ connection: sending Socket) {
-    Task { await newConnection(connection) }
-}
-
-func sendCommandToReleaseServer(args: [String]) {
-    check(isDebug)
-    let socket = Result { try Socket.create(family: .unix, type: .stream, proto: .unix) }.getOrDie()
-    defer {
-        socket.close()
-    }
-    let socketFile = "/tmp/bobko.aerospace-\(unixUserName).sock"
-    if (try? socket.connect(to: socketFile)) == nil { // Can't connect, AeroSpace.app is not running
+func toggleReleaseServerIfDebug(_ state: EnableCmdArgs.State) async {
+    if serverArgs.isReadOnly { return }
+    if !isDebug { return }
+    let socketFile = "/tmp/\(stableAeroSpaceAppId)-\(unixUserName).sock"
+    let connection = NWConnection(to: NWEndpoint.unix(path: socketFile), using: .tcp)
+    defer { connection.cancel() }
+    if await connection.initConnection().error != nil { // Can't connect, AeroSpace.app is not running
         return
     }
 
-    _ = try? socket.write(from: Result { try JSONEncoder().encode(ClientRequest(args: args, stdin: "")) }.getOrDie())
-    _ = try? Socket.wait(for: [socket], timeout: 0, waitForever: true)
-    _ = try? socket.readString()
+    let req = ClientRequest(args: ["enable", state.rawValue], stdin: "", windowId: nil, workspace: nil)
+    _ = await connection.writeAtomic(req)
+    _ = await connection.readNonAtomic()
 }
 
 private let serverVersionAndHash = "\(aeroSpaceAppVersion) \(gitHash)"
 
-private func newConnection(_ socket: Socket) async { // todo add exit codes
-    func answerToClient(exitCode: Int32, stdout: String = "", stderr: String = "") {
+private func newConnection(_ connection: NWConnection) async { // todo add exit codes
+    func answerToClient(exitCode: Int32, stdout: String = "", stderr: String = "") async {
         let ans = ServerAnswer(exitCode: exitCode, stdout: stdout, stderr: stderr, serverVersionAndHash: serverVersionAndHash)
-        answerToClient(ans)
+        await answerToClient(ans)
     }
-    func answerToClient(_ ans: ServerAnswer) {
-        _ = try? socket.write(from: Result { try JSONEncoder().encode(ans) }.getOrDie())
+    func answerToClient(_ ans: ServerAnswer) async {
+        _ = await connection.writeAtomic(ans)
     }
-    defer {
-        socket.close()
-    }
+
+    guard let clientVersion = await connection.readUInt32().getIgnoringErrorsOrNil() else { return }
+    // The server unconditionally answers with the only version it supports
+    if await connection.writeUInt32(SOCKET_PROTOCOL_VERSION).error != nil { return }
+    if clientVersion != SOCKET_PROTOCOL_VERSION { return }
+
     while true {
-        _ = try? Socket.wait(for: [socket], timeout: 0, waitForever: true)
-        var rawRequest = Data()
-        if (try? socket.read(into: &rawRequest)) ?? 0 == 0 {
-            answerToClient(exitCode: 1, stderr: "Empty request")
-            return
-        }
-        let _request = ClientRequest.decodeJson(rawRequest)
-        guard let request: ClientRequest = _request.getOrNil() else {
-            answerToClient(
-                exitCode: 1,
-                stderr: """
-                    Can't parse request '\(String(describing: String(data: rawRequest, encoding: .utf8)).singleQuoted)'.
-                    Error: \(_request.failureOrNil.prettyDescription)
-                    """,
-            )
+        guard let rawRequest = await connection.readNonAtomic().getOrNil(onFailure: { err in
+            await answerToClient(exitCode: EXIT_CODE_TWO, stderr: "Error: \(err)")
+        }) else { return }
+        guard let request = await ClientRequest.decodeJson(rawRequest).getOrNil(onFailure: { err in
+            let msg = """
+                Can't parse request \(String(describing: String(data: rawRequest, encoding: .utf8)).singleQuoted).
+                Error: \(err)
+                """
+            return await answerToClient(exitCode: EXIT_CODE_TWO, stderr: msg)
+        }) else { continue }
+        // Handle subscribe before parseCommand (subscribe doesn't have a Command impl)
+        if request.args.first == "subscribe" {
+            switch parseSubscribeCmdArgs(request.args.slice(1...).orDie()) {
+                case .cmd(let subscribeArgs): await handleSubscribeAndWaitTillError(connection, subscribeArgs)
+                case .help(let help): await answerToClient(exitCode: EXIT_CODE_ZERO, stdout: help)
+                case .failure(let err): await answerToClient(exitCode: err.exitCode, stderr: err.msg)
+            }
             continue
         }
-        let (command, help, err) = parseCommand(request.args).unwrap()
-        guard let token: RunSessionGuard = await .isServerEnabled(orIsEnableCommand: command) else {
-            answerToClient(
-                exitCode: 1,
+        let parsedCmd = parseCommand(request.args)
+        guard let token: RunSessionGuard = await .isServerEnabled(orIsEnableCommand: parsedCmd.cmdOrNil) else {
+            await answerToClient(
+                exitCode: EXIT_CODE_TWO,
                 stderr: "\(aeroSpaceAppName) server is disabled and doesn't accept commands. " +
                     "You can use 'aerospace enable on' to enable the server",
             )
             continue
         }
-        if let help {
-            answerToClient(exitCode: 0, stdout: help)
-            continue
-        }
-        if let err {
-            answerToClient(exitCode: 1, stderr: err)
-            continue
-        }
-        if command?.isExec == true {
-            answerToClient(exitCode: 1, stderr: "exec-and-forget is prohibited in CLI")
-            continue
-        }
-        if let command {
-            let _answer: Result<ServerAnswer, Error> = await Task { @MainActor in
-                try await runSession(.socketServer, token) { () throws in
-                    let cmdResult = try await command.run(.defaultEnv, CmdStdin(request.stdin)) // todo pass AEROSPACE_ env vars from CLI instead of defaultEnv
-                    return ServerAnswer(
-                        exitCode: cmdResult.exitCode,
-                        stdout: cmdResult.stdout.joined(separator: "\n"),
-                        stderr: cmdResult.stderr.joined(separator: "\n"),
-                        serverVersionAndHash: serverVersionAndHash,
-                    )
+        switch parsedCmd {
+            case .help(let help):
+                await answerToClient(exitCode: EXIT_CODE_ZERO, stdout: help)
+                continue
+            case .failure(let err):
+                await answerToClient(exitCode: err.exitCode, stderr: err.msg)
+                continue
+            case .cmd(let command):
+                var answer: ServerAnswer =
+                    await Result {
+                        try await runLightSession(.socketServer(command.args), token) { () throws in
+                            let env = CmdEnv.init(
+                                windowId: request.windowId.flattenOptional(),
+                                workspaceName: request.workspace.flattenOptional(),
+                            )
+                            let cmdResult = await command.run(env, CmdStdin(request.stdin))
+                            return ServerAnswer(
+                                exitCode: cmdResult.exitCode.rawValue,
+                                stdout: cmdResult.stdout.joined(separator: "\n"),
+                                stderr: cmdResult.stderr.joined(separator: "\n"),
+                                serverVersionAndHash: serverVersionAndHash,
+                            )
+                        }
+                    }
+                    .get { err in
+                        ServerAnswer(
+                            exitCode: command.args.failExitCode,
+                            stderr: "Fail to await main thread. \(err.localizedDescription)",
+                            serverVersionAndHash: serverVersionAndHash,
+                        )
+                    }
+                if request.windowId == nil || request.workspace == nil {
+                    answer.stderr += "\n\nAeroSpace client has sent incomplete JSON request. 'windowId' or/and 'workspace' fields are missing. Please forward your AEROSPACE_WINDOW_ID and AEROSPACE_WORKSPACE environment variables to these JSON fields. If the appropriate environment variables are empty, pass explicit 'null' in the JSON."
                 }
-            }.result
-            let answer = _answer.getOrNil() ??
-                ServerAnswer(
-                    exitCode: 1,
-                    stderr: "Fail to await main thread. \(_answer.failureOrNil?.localizedDescription ?? "")",
-                    serverVersionAndHash: serverVersionAndHash,
-                )
-            answerToClient(answer)
-            continue
+                await answerToClient(answer)
+                continue
         }
-        die("Unreachable")
     }
 }

@@ -3,19 +3,19 @@ import Common
 
 struct FocusMonitorCommand: Command {
     let args: FocusMonitorCmdArgs
-    /*conforms*/ var shouldResetClosedWindowsCache = false
+    /*conforms*/ let shouldResetClosedWindowsCache = false
 
-    func run(_ env: CmdEnv, _ io: CmdIo) -> Bool {
-        guard let target = args.resolveTargetOrReportError(env, io) else { return false }
+    func run(_ env: CmdEnv, _ io: CmdIo) -> BinaryExitCode {
+        guard let target = args.resolveTargetOrReportError(env, io) else { return .fail }
         return switch args.target.val.resolve(target.workspace.workspaceMonitor, wrapAround: args.wrapAround) {
-            case .success(let targetMonitor): targetMonitor.activeWorkspace.focusWorkspace()
-            case .failure(let msg): io.err(msg)
+            case .success(let targetMonitor): .from(bool: targetMonitor.activeWorkspace.focusWorkspace())
+            case .failure(let msg): .fail(io.err(msg))
         }
     }
 }
 
 extension MonitorTarget {
-    func resolve(_ currentMonitor: Monitor, wrapAround: Bool) -> Result<Monitor, String> {
+    @MainActor func resolve(_ currentMonitor: MonitorInfo, wrapAround: Bool) -> Result<MonitorInfo, String> {
         switch self {
             case .direction(let direction):
                 guard let (monitorsInDirection, index) = currentMonitor.findRelativeMonitor(inDirection: direction) else {
@@ -27,7 +27,7 @@ extension MonitorTarget {
                 }
                 return .success(targetMonitor)
             case .relative(let nextPrev):
-                let monitors = sortedMonitors
+                let monitors = sortedMonitorInfos
                 guard let curIndex = monitors.firstIndex(where: { $0.rect.topLeftCorner == currentMonitor.rect.topLeftCorner }) else {
                     return .failure("Can't find current monitor")
                 }
@@ -38,7 +38,7 @@ extension MonitorTarget {
                 }
                 return .success(targetMonitor)
             case .patterns(let patterns):
-                let monitors = sortedMonitors
+                let monitors = sortedMonitorInfos
                 guard let targetMonitor = patterns.lazy.compactMap({ $0.resolveMonitor(sortedMonitors: monitors) }).first else {
                     return .failure("None of the monitors match the pattern(s)")
                 }
@@ -47,16 +47,16 @@ extension MonitorTarget {
     }
 }
 
-extension Monitor {
-    func relation(to monitor: Monitor) -> Orientation {
+extension MonitorInfo {
+    func relation(to monitor: MonitorInfo) -> Orientation {
         guard let otherYRange = monitor.rect.minY.until(excl: monitor.rect.maxY) else { return .h }
         guard let myYRange = rect.minY.until(excl: rect.maxY) else { return .h }
         return myYRange.overlaps(otherYRange) ? .h : .v
     }
 
-    func findRelativeMonitor(inDirection direction: CardinalDirection) -> (monitorsInDirection: [Monitor], index: Int)? {
+    func findRelativeMonitor(inDirection direction: CardinalDirection) -> (monitorsInDirection: [MonitorInfo], index: Int)? {
         let currentMonitor = self
-        let monitors = sortedMonitors.filter {
+        let monitors = sortedMonitorInfos.filter {
             currentMonitor.rect.topLeftCorner == $0.rect.topLeftCorner ||
                 $0.relation(to: currentMonitor) == direction.orientation
         }

@@ -1,34 +1,32 @@
 import Common
 
-struct CmdEnv: ConvenienceCopyable { // todo forward env from cli to server
-    var windowId: UInt32?
-    var workspaceName: String?
-    var pwd: String?
+struct CmdEnv {
+    var windowId: UInt32? = nil
+    var workspaceName: String? = nil
 
-    static var defaultEnv: CmdEnv { CmdEnv(windowId: nil, workspaceName: nil, pwd: nil) }
-    init(
-        windowId: UInt32?,
-        workspaceName: String?,
-        pwd: String?
-    ) {
+    static let defaultEnv: CmdEnv = .init()
+
+    consuming func withFocus(_ focus: LiveFocus) -> Self {
+        return switch focus.asLeaf {
+            case .window(let wd): withWindowId(wd.windowId)
+            case .emptyWorkspace(let ws): withWorkspaceName(ws.name)
+        }
+    }
+
+    consuming func withWindowId(_ windowId: UInt32) -> CmdEnv {
         self.windowId = windowId
+        self.workspaceName = nil
+        return self
+    }
+
+    consuming func withWorkspaceName(_ workspaceName: String) -> CmdEnv {
+        self.windowId = nil
         self.workspaceName = workspaceName
-        self.pwd = pwd
+        return self
     }
 
-    func withFocus(_ focus: LiveFocus) -> CmdEnv {
-        switch focus.asLeaf {
-            case .window(let wd): .defaultEnv.copy(\.windowId, wd.windowId)
-            case .emptyWorkspace(let ws): .defaultEnv.copy(\.workspaceName, ws.name)
-        }
-    }
-
-    @MainActor
     var asMap: [String: String] {
-        var result = config.execConfig.envVariables
-        if let pwd {
-            result["PWD"] = pwd
-        }
+        var result = [String: String]()
         if let windowId {
             result[AEROSPACE_WINDOW_ID] = windowId.description
         }

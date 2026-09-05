@@ -7,57 +7,49 @@ let signposter = OSSignposter(subsystem: aeroSpaceAppId, category: .pointsOfInte
 
 let myPid = NSRunningApplication.current.processIdentifier
 let lockScreenAppBundleId = "com.apple.loginwindow"
-let AEROSPACE_WINDOW_ID = "AEROSPACE_WINDOW_ID" // env var
-let AEROSPACE_WORKSPACE = "AEROSPACE_WORKSPACE" // env var
-
-func stringType(of some: Any) -> String {
-    let string = (some is Any.Type) ? String(describing: some) : String(describing: type(of: some))
-    return string
-}
 
 func interceptTermination(_ _signal: Int32) {
-    signal(_signal, { signal in
+    signal(_signal, { (signal: Int32) in
         check(Thread.current.isMainThread)
-        Task {
-            defer { exit(signal) }
-            try await terminationHandler.beforeTermination()
+        Task.startUnstructured { @MainActor in
+            terminationHandler?.beforeTermination()
+            exit(signal)
         }
     } as sig_t)
 }
 
 @MainActor
 func initTerminationHandler() {
-    terminationHandler = AppServerTerminationHandler()
+    unsafe _terminationHandler = AppServerTerminationHandler()
 }
 
 private struct AppServerTerminationHandler: TerminationHandler {
-    func beforeTermination() async throws {
-        try await makeAllWindowsVisibleAndRestoreSize()
+    @MainActor
+    func beforeTermination() {
+        // Make all windows fullscreen before Quit
+        for window in MacWindow.allWindowsMap.values {
+            // makeAllWindowsVisibleAndRestoreSize may be invoked when something went wrong (e.g. some windows are unbound)
+            // that's why it's not allowed to use `.parent` call in here
+            let monitor = window.macApp.getAxRectForTermination(window.windowId)?.center.monitorApproximation ?? mainMonitorInfo
+            let monitorVisibleRect = monitor.visibleRect
+            let windowSize = window.lastFloatingSize ?? CGSize(width: monitorVisibleRect.width, height: monitorVisibleRect.height)
+            let point = CGPoint(
+                x: (monitorVisibleRect.width - windowSize.width) / 2,
+                y: (monitorVisibleRect.height - windowSize.height) / 2,
+            )
+            window.macApp.setAxFrameForTermination(window.windowId, point, windowSize)
+        }
         if isDebug {
-            sendCommandToReleaseServer(args: ["enable", "on"])
+            let semaphore = DispatchSemaphore(value: 0)
+            // Use Task.detached to avoid inheriting @MainActor.
+            // If @MainActor was inherited, it would cause a deadlock
+            Task.detached {
+                await toggleReleaseServerIfDebug(.on)
+                semaphore.signal()
+            }
+            semaphore.wait()
         }
     }
-}
-
-@MainActor
-private func makeAllWindowsVisibleAndRestoreSize() async throws {
-    // Make all windows fullscreen before Quit
-    for (_, window) in MacWindow.allWindowsMap {
-        // makeAllWindowsVisibleAndRestoreSize may be invoked when something went wrong (e.g. some windows are unbound)
-        // that's why it's not allowed to use `.parent` call in here
-        let monitor = try await window.getCenter()?.monitorApproximation ?? mainMonitor
-        let monitorVisibleRect = monitor.visibleRect
-        let windowSize = window.lastFloatingSize ?? CGSize(width: monitorVisibleRect.width, height: monitorVisibleRect.height)
-        let point = CGPoint(
-            x: (monitorVisibleRect.width - windowSize.width) / 2,
-            y: (monitorVisibleRect.height - windowSize.height) / 2,
-        )
-        try await window.setAxFrameBlocking(point, windowSize)
-    }
-}
-
-extension String? {
-    var isNilOrEmpty: Bool { self == nil || self?.isEmpty == true }
 }
 
 @MainActor
@@ -82,26 +74,21 @@ func + (a: CGPoint, b: CGPoint) -> CGPoint {
     CGPoint(x: a.x + b.x, y: a.y + b.y)
 }
 
-extension CGPoint: ConvenienceCopyable {}
+extension CGPoint: ConvenienceMutable {}
 
 extension CGPoint {
-    /// Distance to ``Rect`` outline frame
-    func distanceToRectFrame(to rect: Rect) -> CGFloat {
-        let list: [CGFloat] = (rect.minY.until(excl: rect.maxY)?.contains(y) == true ? [abs(rect.minX - x), abs(rect.maxX - x)] : []) +
-            (rect.minX.until(excl: rect.maxX)?.contains(x) == true ? [abs(rect.minY - y), abs(rect.maxY - y)] : []) +
-            [
-                distance(to: rect.topLeftCorner),
-                distance(to: rect.bottomRightCorner),
-                distance(to: rect.topRightCorner),
-                distance(to: rect.bottomLeftCorner),
-            ]
-        return list.minOrDie()
+    func distance(toOuterFrame rect: Rect) -> CGFloat {
+        // Subtract 1 from maxX/maxY because the right/bottom bounds are
+        // exclusive.
+        let dx = max(rect.minX - x, 0, x - (rect.maxX - 1))
+        let dy = max(rect.minY - y, 0, y - (rect.maxY - 1))
+        return CGPoint(x: dx, y: dy).vectorLength
     }
 
-    func coerceIn(rect: Rect) -> CGPoint? {
+    func coerce(in rect: Rect) -> CGPoint? {
         guard let xRange = rect.minX.until(incl: rect.maxX - 1) else { return nil }
         guard let yRange = rect.minY.until(incl: rect.maxY - 1) else { return nil }
-        return CGPoint(x: x.coerceIn(xRange), y: y.coerceIn(yRange))
+        return CGPoint(x: x.coerce(in: xRange), y: y.coerce(in: yRange))
     }
 
     func addingXOffset(_ offset: CGFloat) -> CGPoint { CGPoint(x: x + offset, y: y) }
@@ -112,14 +99,13 @@ extension CGPoint {
 
     var vectorLength: CGFloat { sqrt(x * x + y * y) }
 
-    func distance(to point: CGPoint) -> Double {
-        sqrt((x - point.x).squared + (y - point.y).squared)
-    }
+    var monitorApproximation: MonitorInfo { monitorInfos.minByOrDie { distance(toOuterFrame: $0.rect) } }
 
-    var monitorApproximation: Monitor {
-        let monitors = monitors
-        return monitors.first(where: { $0.rect.contains(self) })
-            ?? monitors.minByOrDie { distanceToRectFrame(to: $0.rect) }
+    var withYAxisFlipped: CGPoint {
+        consuming get {
+            self.y = mainMonitorInfo.height - self.y
+            return self
+        }
     }
 }
 
@@ -128,18 +114,12 @@ extension CGFloat {
         denominator == 0 ? nil : self / CGFloat(denominator)
     }
 
-    func coerceIn(_ range: ClosedRange<CGFloat>) -> CGFloat {
+    func coerce(in range: ClosedRange<CGFloat>) -> CGFloat {
         switch true {
             case self > range.upperBound: range.upperBound
             case self < range.lowerBound: range.lowerBound
             default: self
         }
-    }
-}
-
-extension CGSize {
-    func copy(width: Double? = nil, height: Double? = nil) -> CGSize {
-        CGSize(width: width ?? self.width, height: height ?? self.height)
     }
 }
 
@@ -157,8 +137,13 @@ extension CGPoint: @retroactive Hashable { // todo migrate to self written Point
 #endif
 
 @inlinable
-public func checkCancellation() throws(CancellationError) {
-    if Task.isCancelled {
+func checkCancellation(_ cm: CancellationMode = .cancellable) throws(CancellationError) {
+    if cm == .cancellable && Task.isCancelled {
         throw CancellationError()
     }
+}
+
+public enum CancellationMode: Equatable, Sendable {
+    case cancellable
+    case nonCancellable
 }

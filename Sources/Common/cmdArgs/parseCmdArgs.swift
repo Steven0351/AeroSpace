@@ -1,26 +1,50 @@
-public func parseCmdArgs(_ args: [String]) -> ParsedCmd<any CmdArgs> {
+public func parseCmdArgs(_ args: StrArrSlice) -> ParsedCmd<any CmdArgs> {
     let subcommand = String(args.first ?? "")
     if subcommand.isEmpty {
-        return .failure("Can't parse empty string command")
+        return .failure("Can't parse empty string command", EXIT_CODE_TWO)
     }
     if let subcommandParser: any SubCommandParserProtocol = subcommandParsers[subcommand] {
-        return subcommandParser.parse(args: Array(args.dropFirst()))
+        return subcommandParser.parse(args: args.slice(1...).orDie())
     } else {
-        return .failure("Unrecognized subcommand '\(subcommand)'")
+        return .failure("Unrecognized subcommand '\(subcommand)'", EXIT_CODE_TWO)
     }
 }
 
-public protocol CmdArgs: ConvenienceCopyable, Equatable, CustomStringConvertible, AeroAny, Sendable {
+public protocol CmdArgs:
+    ConvenienceMutable,
+    Equatable,
+    CustomStringConvertible,
+    AeroAny,
+    Sendable
+{
+    associatedtype ExitCodeType: ExitCode = BinaryExitCode
     static var parser: CmdParser<Self> { get }
-    var rawArgs: EquatableNoop<[String]> { get } // Non Equatable because test comparison
+    var commonState: CmdArgsCommonState { get set }
+}
 
-    // Two very common flags among commands
-    var windowId: UInt32? { get set }
-    var workspaceName: WorkspaceName? { get set }
+public struct CmdArgsCommonState: ConvenienceMutable, Equatable, Sendable {
+    let rawArgsForStrRepr: EquatableNoop<StrArrSlice>
+    var windowId: UInt32? = nil
+    var workspaceName: WorkspaceName? = nil
+    public var explicitStdinFlag: Bool? = nil
+
+    public init(_ raw: StrArrSlice) { rawArgsForStrRepr = .init(raw) }
 }
 
 extension CmdArgs {
     public static var info: CmdStaticInfo { Self.parser.info }
+
+    public var windowId: UInt32? {
+        get { commonState.windowId }
+        set(value) { commonState.windowId = value }
+    }
+
+    public var workspaceName: WorkspaceName? {
+        get { commonState.workspaceName }
+        set(value) { commonState.workspaceName = value }
+    }
+
+    public var failExitCode: Int32 { ExitCodeType.fail.rawValue }
 
     public func equals(_ other: any CmdArgs) -> Bool { // My brain is cursed with Java
         (other as? Self).flatMap { self == $0 } ?? false
@@ -31,46 +55,40 @@ extension CmdArgs {
             case .execAndForget:
                 CmdKind.execAndForget.rawValue + " " + (self as! ExecAndForgetCmdArgs).bashScript
             default:
-                ([Self.info.kind.rawValue] + rawArgs.value).joinArgs()
+                ([Self.info.kind.rawValue] + commonState.rawArgsForStrRepr.value.toArray()).joinArgs()
         }
     }
 }
 
-public struct CmdParser<T: ConvenienceCopyable>: Sendable {
+public struct CmdParser<Root>: Sendable {
     let info: CmdStaticInfo
-    let options: [String: any ArgParserProtocol<T>]
-    let arguments: [any ArgParserProtocol<T>]
+    let flags: [String: any ArgParserProtocol<SubArgParserInput, Root, ()>]
+    let positionalArgs: [any ArgParserProtocol<PosArgParserInput, Root, PosArgParserContext>]
     let conflictingOptions: [Set<String>]
-}
 
-public func cmdParser<T>(
-    kind: CmdKind,
-    allowInConfig: Bool,
-    help: String,
-    options: [String: any ArgParserProtocol<T>],
-    arguments: [any ArgParserProtocol<T>],
-    conflictingOptions: [Set<String>] = []
-) -> CmdParser<T> {
-    CmdParser(
-        info: CmdStaticInfo(help: help, kind: kind, allowInConfig: allowInConfig),
-        options: options,
-        arguments: arguments,
-        conflictingOptions: conflictingOptions,
-    )
+    init(
+        kind: CmdKind,
+        help: String,
+        flags: [String: any ArgParserProtocol<SubArgParserInput, Root, ()>],
+        posArgs: [any ArgParserProtocol<PosArgParserInput, Root, PosArgParserContext>],
+        conflictingOptions: [Set<String>] = [],
+    ) {
+        self.info = CmdStaticInfo(help: help, kind: kind)
+        self.flags = flags
+        self.positionalArgs = posArgs
+        self.conflictingOptions = conflictingOptions
+    }
 }
 
 public struct CmdStaticInfo: Equatable, Sendable {
     public let help: String
     public let kind: CmdKind
-    public let allowInConfig: Bool // Query commands are prohibited in config
 
     public init(
         help: String,
         kind: CmdKind,
-        allowInConfig: Bool
     ) {
         self.help = help
         self.kind = kind
-        self.allowInConfig = allowInConfig
     }
 }

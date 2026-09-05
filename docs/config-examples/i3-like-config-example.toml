@@ -1,5 +1,10 @@
 # Reference: https://github.com/i3/i3/blob/next/etc/config
 
+config-version = 2
+
+# In i3, all workspaces are phantom
+persistent-workspaces = []
+
 # i3 doesn't have "normalizations" feature that why we disable them here.
 # But the feature is very helpful.
 # Normalizations eliminate all sorts of weird tree configurations that don't make sense.
@@ -12,12 +17,8 @@ on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
 
 [mode.main.binding]
     # See: https://nikitabobko.github.io/AeroSpace/goodies#open-a-new-window-with-applescript
-    alt-enter = '''exec-and-forget osascript -e '
-    tell application "Terminal"
-        do script
-        activate
-    end tell'
-    '''
+    alt-enter = '''exec-and-forget osascript -e \
+    'tell application "Terminal" to tell (do script) to activate' '''
 
     # i3 wraps focus by default
     alt-j =         'focus --boundaries-action wrap-around-the-workspace left'

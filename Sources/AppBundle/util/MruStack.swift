@@ -1,5 +1,5 @@
 /// Stack with most recently element on top
-class MruStack<T: Equatable>: Sequence {
+final class MruStack<T: Equatable>: Sequence {
     typealias Element = T
 
     private var mruNode: Node<T>? = nil
@@ -21,10 +21,9 @@ class MruStack<T: Equatable>: Sequence {
         var current = mruNode
         while let cur = current {
             if cur.value == value {
-                if let prev {
-                    prev.next = cur.next
-                } else {
-                    mruNode = current?.next
+                switch prev {
+                    case let prev?: prev.next = cur.next
+                    case nil: mruNode = current?.next
                 }
                 cur.next = nil
                 return true
@@ -33,16 +32,6 @@ class MruStack<T: Equatable>: Sequence {
             current = cur.next
         }
         return false
-    }
-}
-
-extension MruStack where T: Hashable {
-    var mruIndexMap: [T: Int] {
-        var result: [T: Int] = [:]
-        for (index, value) in enumerated() {
-            result[value] = index
-        }
-        return result
     }
 }
 
@@ -61,7 +50,7 @@ struct MruStackIterator<T: Equatable>: IteratorProtocol {
     }
 }
 
-private class Node<T: Equatable> {
+private final class Node<T: Equatable> {
     var next: Node<T>? = nil
     let value: T
 

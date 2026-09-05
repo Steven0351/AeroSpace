@@ -1,7 +1,7 @@
 import AppKit
 
 extension Workspace {
-    @MainActor // todo can be dropped in future Swift versions?
+    @MainActor
     func layoutWorkspace() async throws {
         if isEffectivelyEmpty { return }
         let rect = workspaceMonitor.visibleRectPaddedByOuterGaps
@@ -13,7 +13,7 @@ extension Workspace {
 }
 
 extension TreeNode {
-    @MainActor // todo can be dropped in future Swift versions?
+    @MainActor
     fileprivate func layoutRecursive(_ point: CGPoint, width: CGFloat, height: CGFloat, virtual: Rect, _ context: LayoutContext) async throws {
         let physicalRect = Rect(topLeftX: point.x, topLeftY: point.y, width: width, height: height)
         switch nodeCases {
@@ -21,7 +21,9 @@ extension TreeNode {
                 lastAppliedLayoutPhysicalRect = physicalRect
                 lastAppliedLayoutVirtualRect = virtual
                 try await workspace.rootTilingContainer.layoutRecursive(point, width: width, height: height, virtual: virtual, context)
-                for window in workspace.children.filterIsInstance(of: Window.self) {
+                try await workspace.floatingWindowsContainer.layoutRecursive(point, width: width, height: height, virtual: virtual, context)
+            case .floatingWindowsContainer(let container):
+                for window in container.children.filterIsInstance(of: Window.self) {
                     window.lastAppliedLayoutPhysicalRect = nil
                     window.lastAppliedLayoutVirtualRect = nil
                     try await window.layoutFloatingWindow(context)
@@ -66,19 +68,26 @@ private struct LayoutContext {
 }
 
 extension Window {
-    @MainActor // todo can be dropped in future Swift versions?
+    @MainActor
     fileprivate func layoutFloatingWindow(_ context: LayoutContext) async throws {
         let workspace = context.workspace
-        let currentMonitor = try await getCenter()?.monitorApproximation // Probably not idempotent
-        if let currentMonitor, let windowTopLeftCorner = try await getAxTopLeftCorner(), workspace != currentMonitor.activeWorkspace {
+        let windowRect = try await getAxRect(.cancellable) // Probably not idempotent
+        let currentMonitor = windowRect?.center.monitorApproximation
+        if let currentMonitor, let windowRect, workspace != currentMonitor.activeWorkspace {
+            let windowTopLeftCorner = windowRect.topLeftCorner
             let xProportion = (windowTopLeftCorner.x - currentMonitor.visibleRect.topLeftX) / currentMonitor.visibleRect.width
             let yProportion = (windowTopLeftCorner.y - currentMonitor.visibleRect.topLeftY) / currentMonitor.visibleRect.height
 
-            let moveTo = workspace.workspaceMonitor
-            setAxTopLeftCorner(CGPoint(
-                x: moveTo.visibleRect.topLeftX + xProportion * moveTo.visibleRect.width,
-                y: moveTo.visibleRect.topLeftY + yProportion * moveTo.visibleRect.height,
-            ))
+            let workspaceRect = workspace.workspaceMonitor.visibleRect
+            var newX = workspaceRect.topLeftX + xProportion * workspaceRect.width
+            var newY = workspaceRect.topLeftY + yProportion * workspaceRect.height
+
+            let windowWidth = windowRect.width
+            let windowHeight = windowRect.height
+            newX = newX.coerce(in: workspaceRect.minX ... max(workspaceRect.minX, workspaceRect.maxX - windowWidth))
+            newY = newY.coerce(in: workspaceRect.minY ... max(workspaceRect.minY, workspaceRect.maxY - windowHeight))
+
+            setAxFrame(CGPoint(x: newX, y: newY), nil)
         }
         if isFullscreen {
             layoutFullscreen(context)
@@ -86,7 +95,7 @@ extension Window {
         }
     }
 
-    @MainActor // todo can be dropped in future Swift versions?
+    @MainActor
     fileprivate func layoutFullscreen(_ context: LayoutContext) {
         let monitorRect = noOuterGapsInFullscreen
             ? context.workspace.workspaceMonitor.visibleRect
@@ -96,7 +105,7 @@ extension Window {
 }
 
 extension TilingContainer {
-    @MainActor // todo can be dropped in future Swift versions?
+    @MainActor
     fileprivate func layoutTiles(_ point: CGPoint, width: CGFloat, height: CGFloat, virtual: Rect, _ context: LayoutContext) async throws {
         var point = point
         var virtualPoint = virtual.topLeftCorner
@@ -131,7 +140,7 @@ extension TilingContainer {
         }
     }
 
-    @MainActor // todo can be dropped in future Swift versions?
+    @MainActor
     fileprivate func layoutAccordion(_ point: CGPoint, width: CGFloat, height: CGFloat, virtual: Rect, _ context: LayoutContext) async throws {
         guard let mruIndex: Int = mostRecentChild?.ownIndex else { return }
         for (index, child) in children.enumerated() {

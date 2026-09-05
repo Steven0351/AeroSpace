@@ -3,11 +3,21 @@ import Common
 import PrivateApi
 
 @MainActor
-func checkAccessibilityPermissions() {
+func waitForAccessibilityPermission_nonCancellable() async {
     let options = [axTrustedCheckOptionPrompt: true]
-    if !AXIsProcessTrustedWithOptions(options as CFDictionary) {
-        resetAccessibility() // Because macOS doesn't reset it for us when the app signature changes...
-        terminateApp()
+    while true {
+        let status = TrayMenuModel.shared.axPermissionStatus == .waitingWithPrompt
+            ? AXIsProcessTrustedWithOptions(options as CFDictionary)
+            : AXIsProcessTrusted()
+        if status {
+            TrayMenuModel.shared.axPermissionStatus = .granted
+            break
+        }
+        if TrayMenuModel.shared.axPermissionStatus == .waitingWithPrompt {
+            resetAccessibility() // Because macOS doesn't reset it for us when the app signature changes...
+        }
+        TrayMenuModel.shared.axPermissionStatus = .waiting
+        try? await Task.sleep(for: .seconds(1))
     }
 }
 
@@ -176,42 +186,46 @@ enum Ax {
         var setter: @Sendable (T) -> CFTypeRef?
     }
 
+    static let parentWindowRecursive = ReadableAttrImpl<AXUIElement>(
+        key: kAXWindowAttribute,
+        getter: { ($0 as! AXUIElement) },
+    )
     static let titleAttr = WritableAttrImpl<String>(
         key: kAXTitleAttribute,
         getter: { $0 as? String },
-        setter: { $0 as CFTypeRef }
+        setter: { $0 as CFTypeRef },
     )
     static let roleAttr = WritableAttrImpl<String>(
         key: kAXRoleAttribute,
         getter: { $0 as? String },
-        setter: { $0 as CFTypeRef }
+        setter: { $0 as CFTypeRef },
     )
     static let subroleAttr = WritableAttrImpl<String>(
         key: kAXSubroleAttribute,
         getter: { $0 as? String },
-        setter: { $0 as CFTypeRef }
+        setter: { $0 as CFTypeRef },
     )
     static let identifierAttr = ReadableAttrImpl<String>(
         key: kAXIdentifierAttribute,
-        getter: { $0 as? String }
+        getter: { $0 as? String },
     )
-    static let modalAttr = ReadableAttrImpl<Bool>(
-        key: kAXModalAttribute,
-        getter: { $0 as? Bool }
-    )
+    // static let modalAttr = ReadableAttrImpl<Bool>(
+    //     key: kAXModalAttribute,
+    //     getter: { $0 as? Bool },
+    // )
     static let enabledAttr = ReadableAttrImpl<Bool>(
         key: kAXEnabledAttribute,
-        getter: { $0 as? Bool }
+        getter: { $0 as? Bool },
     )
     static let enhancedUserInterfaceAttr = WritableAttrImpl<Bool>(
         key: "AXEnhancedUserInterface",
         getter: { $0 as? Bool },
-        setter: { $0 as CFTypeRef }
+        setter: { $0 as CFTypeRef },
     )
     static let minimizedAttr = WritableAttrImpl<Bool>(
         key: kAXMinimizedAttribute,
         getter: { $0 as? Bool },
-        setter: { $0 as CFTypeRef }
+        setter: { $0 as CFTypeRef },
     )
     //static let minimizedAttr = ReadableAttrImpl<Bool>(
     //    key: kAXMinimizedAttribute,
@@ -220,50 +234,50 @@ enum Ax {
     static let isFullscreenAttr = WritableAttrImpl<Bool>(
         key: "AXFullScreen",
         getter: { $0 as? Bool },
-        setter: { $0 as CFTypeRef }
+        setter: { $0 as CFTypeRef },
     )
     static let isFocused = ReadableAttrImpl<Bool>(
         key: kAXFocusedAttribute,
-        getter: { $0 as? Bool }
+        getter: { $0 as? Bool },
     )
     static let isMainAttr = WritableAttrImpl<Bool>(
         key: kAXMainAttribute,
         getter: { $0 as? Bool },
-        setter: { $0 as CFTypeRef }
+        setter: { $0 as CFTypeRef },
     )
     static let sizeAttr = WritableAttrImpl<CGSize>(
         key: kAXSizeAttribute,
         getter: {
             var raw: CGSize = .zero
-            check(AXValueGetValue($0 as! AXValue, .cgSize, &raw))
+            check(unsafe AXValueGetValue($0 as! AXValue, .cgSize, &raw))
             return raw
         },
         setter: {
             var size = $0
-            return AXValueCreate(.cgSize, &size) as CFTypeRef
-        }
+            return unsafe AXValueCreate(.cgSize, &size) as CFTypeRef
+        },
     )
     static let topLeftCornerAttr = WritableAttrImpl<CGPoint>(
         key: kAXPositionAttribute,
         getter: {
             var raw: CGPoint = .zero
-            AXValueGetValue($0 as! AXValue, .cgPoint, &raw)
+            check(unsafe AXValueGetValue($0 as! AXValue, .cgPoint, &raw))
             return raw
         },
         setter: {
             var size = $0
-            return AXValueCreate(.cgPoint, &size) as CFTypeRef
-        }
+            return unsafe AXValueCreate(.cgPoint, &size) as CFTypeRef
+        },
     )
     /// Returns windows visible on all monitors
     /// If some windows are located on not active macOS Spaces then they won't be returned
     static let windowsAttr = ReadableAttrImpl<[WindowIdAndAxUiElement]>(
         key: kAXWindowsAttribute,
-        getter: { ($0 as? NSArray)?.compactMap(windowOrNil).map { ($0.windowId, $0.ax.cast) } ?? [] }
+        getter: { ($0 as? NSArray)?.compactMap(windowOrNil).map { ($0.windowId, $0.ax.cast) } ?? [] },
     )
     static let focusedWindowAttr = ReadableAttrImpl<WindowIdAndAxUiElementMock>(
         key: kAXFocusedWindowAttribute,
-        getter: windowOrNil
+        getter: windowOrNil,
     )
     //static let mainWindowAttr = ReadableAttrImpl<AXUIElement>(
     //    key: kAXMainWindowAttribute,
@@ -271,21 +285,21 @@ enum Ax {
     //)
     static let closeButtonAttr = ReadableAttrImpl<any AxUiElementMock>(
         key: kAXCloseButtonAttribute,
-        getter: castToAxUiElementMock
+        getter: castToAxUiElementMock,
     )
     // Note! fullscreen is not the same as "zoom" (green plus)
     static let fullscreenButtonAttr = ReadableAttrImpl<any AxUiElementMock>(
         key: kAXFullScreenButtonAttribute,
-        getter: castToAxUiElementMock
+        getter: castToAxUiElementMock,
     )
     // green plus
     static let zoomButtonAttr = ReadableAttrImpl<any AxUiElementMock>(
         key: kAXZoomButtonAttribute,
-        getter: castToAxUiElementMock
+        getter: castToAxUiElementMock,
     )
     static let minimizeButtonAttr = ReadableAttrImpl<any AxUiElementMock>(
         key: kAXMinimizeButtonAttribute,
-        getter: castToAxUiElementMock
+        getter: castToAxUiElementMock,
     )
     //static let growAreaAttr = ReadableAttrImpl<AXUIElement>(
     //    key: kAXGrowAreaAttribute,
@@ -301,7 +315,7 @@ private func castToAxUiElementMock(_ a: AnyObject) -> AxUiElementMock {
             let windowId = UInt32.init(String(str.prefix(upTo: commaIndex)).removePrefix("AXUIElement(AxWindowId="))
             if let windowId {
                 return castToAxUiElementMock([
-                    "Aero.axWindowId": Json.uint32(windowId),
+                    "Aero.axWindowId": Json.int(windowId),
                     kAXAeroSynthetic: Json.bool(true),
                 ] as AnyObject)
             }
@@ -321,11 +335,9 @@ private func windowOrNil(_ any: Any?) -> WindowIdAndAxUiElementMock? {
     guard let any else { return nil }
     let potentialWindow = castToAxUiElementMock(any as AnyObject)
     // Filter out non-window objects (e.g. Finder's desktop)
-    let windowId = potentialWindow.containingWindowId()
-    if let windowId {
-        return (windowId, potentialWindow)
-    } else {
-        return nil
+    return switch potentialWindow.containingWindowId() {
+        case let windowId?: (windowId, potentialWindow)
+        case nil: nil
     }
 }
 
@@ -334,12 +346,13 @@ extension AXUIElement: AxUiElementMock {
         let state = signposter.beginInterval(#function, "attr: \(attr.key) axTaskLocalAppThreadToken: \(axTaskLocalAppThreadToken?.idForDebug)")
         defer { signposter.endInterval(#function, state) }
         var raw: AnyObject?
-        return AXUIElementCopyAttributeValue(self, attr.key as CFString, &raw) == .success
+        return unsafe AXUIElementCopyAttributeValue(self, attr.key as CFString, &raw) == .success
             ? raw.flatMap(attr.getter)
             : nil
     }
 
     @discardableResult func set<Attr: WritableAttr>(_ attr: Attr, _ value: Attr.T) -> Bool {
+        if serverArgs.isReadOnly { return false }
         let state = signposter.beginInterval(#function, "attr: \(attr.key) axTaskLocalAppThreadToken: \(axTaskLocalAppThreadToken?.idForDebug)")
         defer { signposter.endInterval(#function, state) }
         guard let value = attr.setter(value) else { return false }
@@ -350,13 +363,15 @@ extension AXUIElement: AxUiElementMock {
         let state = signposter.beginInterval(#function, "axTaskLocalAppThreadToken: \(axTaskLocalAppThreadToken?.idForDebug)")
         defer { signposter.endInterval(#function, state) }
         var cgWindowId = CGWindowID()
-        return _AXUIElementGetWindow(self, &cgWindowId) == .success ? cgWindowId : nil
+        return unsafe _AXUIElementGetWindow(self, &cgWindowId) == .success && cgWindowId != kCGNullWindowID
+            ? cgWindowId
+            : nil
     }
 }
 
 extension AXObserver {
     static func new(_ pid: pid_t, _ handler: AXObserverCallback) -> AXObserver? {
         var observer: AXObserver? = nil
-        return AXObserverCreate(pid, handler, &observer) == .success ? observer : nil
+        return unsafe AXObserverCreate(pid, handler, &observer) == .success ? observer : nil
     }
 }

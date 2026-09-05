@@ -1,22 +1,25 @@
 public struct LayoutCmdArgs: CmdArgs {
-    public let rawArgs: EquatableNoop<[String]>
-    fileprivate init(rawArgs: [String]) { self.rawArgs = .init(rawArgs) }
-    public static let parser: CmdParser<Self> = cmdParser(
+    /*conforms*/ public var commonState: CmdArgsCommonState
+    fileprivate init(rawArgs: StrArrSlice) { self.commonState = .init(rawArgs) }
+    public static let parser: CmdParser<Self> = .init(
         kind: .layout,
-        allowInConfig: true,
         help: layout_help_generated,
-        options: [
-            "--window-id": optionalWindowIdFlag(),
+        flags: [
+            "--window-id": windowIdSubArgParser(),
+            "--workspace": workspaceSubArgParser(),
+            "--root": trueBoolFlag(\.root),
+            "--fail-if-noop": trueBoolFlag(\.failIfNoop),
         ],
-        arguments: [newArgParser(\.toggleBetween, parseToggleBetween, mandatoryArgPlaceholder: LayoutDescription.unionLiteral)],
+        posArgs: [newMandatoryPosArgParser(\.toggleBetween, parseToggleBetween, placeholder: LayoutDescription.unionLiteral)],
+        conflictingOptions: [
+            ["--window-id", "--workspace"],
+        ],
     )
 
     public var toggleBetween: Lateinit<[LayoutDescription]> = .uninitialized
-    /*conforms*/ public var windowId: UInt32?
-    /*conforms*/ public var workspaceName: WorkspaceName?
 
     public init(rawArgs: [String], toggleBetween: [LayoutDescription]) {
-        self.rawArgs = .init(rawArgs)
+        self.commonState = .init(rawArgs.slice)
         self.toggleBetween = .initialized(toggleBetween)
     }
 
@@ -26,29 +29,51 @@ public struct LayoutCmdArgs: CmdArgs {
         case h_accordion, v_accordion, h_tiles, v_tiles
         case tiling, floating
     }
+
+    public var root: Bool = false
+    public var failIfNoop: Bool = false
 }
 
-private func parseToggleBetween(arg: String, _ nextArgs: inout [String]) -> Parsed<[LayoutCmdArgs.LayoutDescription]> {
-    var args: [String] = nextArgs.allNextNonFlagArgs()
-    args.insert(arg, at: 0)
+public let layoutCommandRootFlagIncompatibilityMsg = "layout command: --root and tiling|floating are incompatible"
+
+private func parseToggleBetween(input: PosArgParserInput) -> ParsedCliArgs<[LayoutCmdArgs.LayoutDescription]> {
+    let args = input.nonFlagArgs()
 
     var result: [LayoutCmdArgs.LayoutDescription] = []
+    var i = 0
     for arg in args {
         if let layout = arg.parseLayoutDescription() {
             result.append(layout)
         } else {
-            return .failure("Can't parse '\(arg)'\nPossible values: \(LayoutCmdArgs.LayoutDescription.unionLiteral)")
+            return .fail(
+                "Can't parse '\(arg)'\nPossible values: \(LayoutCmdArgs.LayoutDescription.unionLiteral)",
+                advanceBy: i + 1,
+            )
         }
+        i += 1
     }
 
-    return .success(result)
+    return .succ(result, advanceBy: args.count)
 }
 
-public func parseLayoutCmdArgs(_ args: [String]) -> ParsedCmd<LayoutCmdArgs> {
-    parseSpecificCmdArgs(LayoutCmdArgs(rawArgs: args), args).map {
-        check(!$0.toggleBetween.val.isEmpty)
-        return $0
-    }
+func parseLayoutCmdArgs(_ args: StrArrSlice) -> ParsedCmd<LayoutCmdArgs> {
+    parseSpecificCmdArgs(LayoutCmdArgs(rawArgs: args), args)
+        .map {
+            check(!$0.toggleBetween.val.isEmpty)
+            return $0
+        }
+        .filter(layoutCommandRootFlagIncompatibilityMsg) { cmdArgs in
+            !cmdArgs.root || cmdArgs.toggleBetween.val.allSatisfy {
+                switch $0 {
+                    case .floating, .tiling: false
+                    case .accordion, .h_accordion, .h_tiles,
+                         .horizontal, .tiles, .v_accordion, .v_tiles,
+                         .vertical: true
+                }
+            }
+        }
+        .filter("--workspace flag requires using an explicit --root flag") { ($0.workspaceName != nil).implies($0.root) }
+        .filter("--fail-if-noop allows only one <target-layout> argument") { $0.failIfNoop.implies($0.toggleBetween.val.count == 1) }
 }
 
 extension String {

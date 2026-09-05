@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import Foundation
 
+public let socketPath = "/tmp/\(aeroSpaceAppId)-\(unixUserName).sock"
 public let unixUserName = NSUserName()
 public let mainModeId = "main"
 
@@ -11,17 +12,17 @@ public var refreshSessionEvent: RefreshSessionEvent? = nil
 @TaskLocal
 private var recursionDetectorDuringTermination = false
 
-public func dieT<T>(
+public func bugPrompt(
     _ __message: String = "",
-    file: String = #fileID,
+    isDie: Bool = false,
+    file: StaticString = #fileID,
     line: Int = #line,
     column: Int = #column,
-    function: String = #function
-) -> T {
+    function: String = #function,
+) -> String {
     let _message = __message.contains("\n") ? "\n" + __message.prefixLines(with: "    ") : __message
     let thread = Thread.current
-    let message =
-        """
+    return """
         Please report to:
             https://github.com/nikitabobko/AeroSpace/discussions/categories/potential-bugs
             Please describe what you did to trigger this error
@@ -38,12 +39,23 @@ public func dieT<T>(
         Coordinate: \(file):\(line):\(column) \(function)
         recursionDetectorDuringTermination: \(recursionDetectorDuringTermination)
         cli: \(isCli)
+        die: \(isDie)
         Monitor count: \(NSScreen.screens.count)
         Displays have separate spaces: \(NSScreen.screensHaveSeparateSpaces)
 
         Stacktrace:
         \(getStringStacktrace())
         """
+}
+
+public func dieT<T>(
+    _ __message: String = "",
+    file: StaticString = #fileID,
+    line: Int = #line,
+    column: Int = #column,
+    function: String = #function,
+) -> T {
+    let message = bugPrompt(__message, isDie: true, file: file, line: line, column: column, function: function)
     if !isUnitTest && isServer {
         showMessageInGui(
             filenameIfConsoleApp: recursionDetectorDuringTermination
@@ -53,61 +65,69 @@ public func dieT<T>(
             message: message,
         )
     }
-    if !recursionDetectorDuringTermination {
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            defer { semaphore.signal() }
-            try await $recursionDetectorDuringTermination.withValue(true) {
-                try await terminationHandler.beforeTermination()
+    if let terminationHandler, !recursionDetectorDuringTermination {
+        MainActor.runSync {
+            $recursionDetectorDuringTermination.withValue(true) {
+                terminationHandler.beforeTermination()
             }
         }
-        semaphore.wait()
     }
     fatalError("\n" + message)
 }
 
+extension MainActor {
+    static func runSync(block: @escaping @MainActor () -> ()) {
+        switch Thread.isMainThread {
+            case true: MainActor.assumeIsolated(block)
+            case false: DispatchQueue.main.asyncAndWait { block() }
+        }
+    }
+}
+
 public enum RefreshSessionEvent: Sendable, CustomStringConvertible {
+    case configAutoReload
     case globalObserver(String)
     case globalObserverLeftMouseUp
     case menuBarButton
     case hotkeyBinding
     case startup
-    case socketServer
+    case socketServer(any CmdArgs)
     case resetManipulatedWithMouse
     case ax(String)
-    case onFocusedMonitorChanged
-    case onFocusChanged
+    case focusFollowsMouse
 
     public var isStartup: Bool {
         if case .startup = self { return true } else { return false }
     }
 
+    public var isFocusFollowsMouse: Bool {
+        if case .focusFollowsMouse = self { return true } else { return false }
+    }
+
     public var description: String {
         switch self {
             case .ax(let str): "ax(\(str))"
+            case .configAutoReload: "configAutoReload"
             case .globalObserver(let str): "globalObserver(\(str))"
             case .globalObserverLeftMouseUp: "globalObserverLeftMouseUp"
             case .hotkeyBinding: "hotkeyBinding"
             case .menuBarButton: "menuBarButton"
             case .resetManipulatedWithMouse: "resetManipulatedWithMouse"
-            case .socketServer: " socketServer"
+            case .socketServer(let args): "socketServer: \(args)"
             case .startup: "startup"
-            case .onFocusedMonitorChanged: "onFocusedMonitorChanged"
-            case .onFocusChanged: "onFocusChanged"
+            case .focusFollowsMouse: "focusFollowsMouse"
         }
     }
 }
 
-public func throwT<T>(_ error: Error) throws -> T {
-    throw error
-}
+// periphery:ignore
+public func throwT<T, E: Error>(_ error: E) throws(E) -> T { throw error }
 
-public func printStacktrace() { print(getStringStacktrace()) }
 public func getStringStacktrace() -> String { Thread.callStackSymbols.joined(separator: "\n") }
 
 @inlinable public func die(
     _ message: String = "",
-    file: String = #fileID,
+    file: StaticString = #fileID,
     line: Int = #line,
     column: Int = #column,
     function: String = #function,
@@ -118,7 +138,7 @@ public func getStringStacktrace() -> String { Thread.callStackSymbols.joined(sep
 public func check(
     _ condition: Bool,
     _ message: @autoclosure () -> String = "",
-    file: String = #fileID,
+    file: StaticString = #fileID,
     line: Int = #line,
     column: Int = #column,
     function: String = #function,
@@ -168,40 +188,32 @@ extension Bool {
     public func implies(_ mustHold: @autoclosure () -> Bool) -> Bool { !self || mustHold() }
 }
 
-extension Double {
-    public var squared: Double { self * self }
-}
-
-extension Slice {
-    public func toArray() -> [Base.Element] { Array(self) }
-}
-
 extension URL {
     public func open(with url: URL) {
         NSWorkspace.shared.open([self], withApplicationAt: url, configuration: NSWorkspace.OpenConfiguration())
     }
 }
 
-public func printStderr(_ msg: String) {
-    fputs(msg + "\n", stderr)
+public func eprint(_ msg: String) {
+    unsafe fputs(msg + "\n", stderr)
 }
 
-public func cliError(_ message: String = "") -> Never {
-    cliErrorT(message)
+public func exit(_ exitCode: Int32, out: String? = nil, err: String? = nil) -> Never {
+    exitT(exitCode, out: out, err: err)
 }
 
-public func cliErrorT<T>(_ message: String = "") -> T {
-    printStderr(message)
-    exit(1)
+public func exitT<T>(_ exitCode: Int32, out: String? = nil, err: String? = nil) -> T {
+    if let out { print(out) }
+    if let err { eprint(err) }
+    exit(exitCode)
 }
 
-@inlinable
-public func allowOnlyCancellationError<T>(isolation: isolated (any Actor)? = #isolation, _ block: () async throws -> sending T) async throws -> sending T {
-    do {
-        return try await block()
-    } catch let e as CancellationError {
-        throw e
-    } catch {
-        die("throws must only be used for CancellationError")
+/// 'id' stands for 'identity'. It's a common name in functional programming
+public func id<T>(_ t: T) -> T { t }
+
+@inlinable public func zipIfCountsAreEqual<C1, C2>(_ c1: C1, _ c2: C2) -> Zip2Sequence<C1, C2>? where C1: Collection, C2: Collection {
+    switch c1.count == c2.count {
+        case true: zip(c1, c2)
+        case false: nil
     }
 }
